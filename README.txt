@@ -6,12 +6,12 @@ roo
 
 Roo can access the contents of various spreadsheet files. It can handle
 * Openoffice
-* Excel
 * Google spreadsheets
 * Excelx
 * Libreoffice
 * CSV
 
+* .xls is not supported because of GPLv3 license.
 
 == FEATURES/PROBLEMS:
 
