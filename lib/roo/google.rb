@@ -1,12 +1,16 @@
-require "google_spreadsheet"
+begin
+  require "google_spreadsheet"
+rescue LoadError => e
+  raise e, "Using Roo::Google requires the google-spreadsheet-ruby gem"
+end
 
 class GoogleHTTPError < RuntimeError; end
 class GoogleReadError < RuntimeError; end
 class GoogleWriteError < RuntimeError; end
 
-class Google < GenericSpreadsheet
+class Roo::Google < Roo::GenericSpreadsheet
   attr_accessor :date_format, :datetime_format
-  
+
   # Creates a new Google spreadsheet object.
   def initialize(spreadsheetkey,user=nil,password=nil)
     @filename = spreadsheetkey
@@ -35,7 +39,7 @@ class Google < GenericSpreadsheet
     @cells_read = Hash.new
     @header_line = 1
     @date_format = '%d/%m/%Y'
-    @datetime_format = '%d/%m/%Y %H:%M:%S' 
+    @datetime_format = '%d/%m/%Y %H:%M:%S'
     @time_format = '%H:%M:%S'
     session = GoogleSpreadsheet.login(user, password)
     @sheetlist = []
@@ -52,31 +56,25 @@ class Google < GenericSpreadsheet
   end
 
   def date?(string)
-    begin
-      Date.strptime(string, @date_format)
-      true
-    rescue
-      false
-    end
+    Date.strptime(string, @date_format)
+    true
+  rescue
+    false
   end
 
   # is String a time with format HH:MM:SS?
   def time?(string)
-    begin
-      DateTime.strptime(string, @time_format)
-      true
-    rescue
-      false
-    end
+    DateTime.strptime(string, @time_format)
+    true
+  rescue
+    false
   end
 
   def datetime?(string)
-    begin
-      DateTime.strptime(string, @datetime_format)
-      true
-    rescue
-      false
-    end
+    DateTime.strptime(string, @datetime_format)
+    true
+  rescue
+    false
   end
 
   def numeric?(string)
@@ -93,8 +91,8 @@ class Google < GenericSpreadsheet
   # (1,1), (1,'A'), ('A',1), ('a',1) all refers to the
   # cell at the first line and first row.
   def cell(row, col, sheet=nil)
-    sheet = @default_sheet unless sheet
-    check_default_sheet #TODO: 2007-12-16
+    sheet ||= @default_sheet
+    validate_sheet!(sheet) #TODO: 2007-12-16
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     value = @cell[sheet]["#{row},#{col}"]
@@ -110,7 +108,7 @@ class Google < GenericSpreadsheet
       rescue ArgumentError
         raise "Invalid DateTime #{sheet}[#{row},#{col}] #{value} using format '{@datetime_format}'"
       end
-    end 
+    end
     return value
   end
 
@@ -123,7 +121,7 @@ class Google < GenericSpreadsheet
   # * :time
   # * :datetime
   def celltype(row, col, sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     if @formula.size > 0 && @formula[sheet]["#{row},#{col}"]
@@ -137,19 +135,19 @@ class Google < GenericSpreadsheet
   # Returns nil if there is no formula.
   # The method #formula? checks if there is a formula.
   def formula(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     if @formula[sheet]["#{row},#{col}"] == nil
       return nil
     else
-      return @formula[sheet]["#{row},#{col}"] 
+      return @formula[sheet]["#{row},#{col}"]
     end
   end
 
   # true, if there is a formula
   def formula?(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     formula(row,col) != nil
@@ -167,40 +165,42 @@ class Google < GenericSpreadsheet
 
   # sets the cell to the content of 'value'
   # a formula can be set in the form of '=SUM(...)'
-  def set_value(row,col,value,sheet=nil)
-    sheet = @default_sheet unless sheet
-    raise RangeError, "sheet not set" unless sheet
-    #@@ Set and pass sheet_no
-    begin
-      sheet_no = sheets.index(sheet)+1
-    rescue
-      raise RangeError, "invalid sheet '"+sheet.to_s+"'"
-    end
+  def set(row,col,value,sheet=nil)
+    sheet ||= @default_sheet
+    validate_sheet!(sheet)
+
+    sheet_no = sheets.index(sheet)+1
     row,col = normalize(row,col)
     add_to_cell_roo(row,col,value,sheet_no)
     # re-read the portion of the document that has changed
     if @cells_read[sheet]
-      key = "#{row},#{col}"
-      (value, value_type) = determine_datatype(value.to_s)
-      @cell[sheet][key] = value 
-      @cell_type[sheet][key] = value_type 
+      value, value_type = determine_datatype(value.to_s)
+
+      _set_value(col,row,value,sheet)
+      set_type(col,row,value_type,sheet)
     end
   end
-  
+
+  # *DEPRECATED*: Use Roo::Google#set instead
+  def set_value(row,col,value,sheet=nil)
+    warn "[DEPRECATION] `set_value` is deprecated.  Please use `set` instead."
+    set(row,col,value,sheet)
+  end
+
   # returns the first non-empty row in a sheet
   def first_row(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     unless @first_row[sheet]
       sheet_no = sheets.index(sheet) + 1
       @first_row[sheet], @last_row[sheet], @first_column[sheet], @last_column[sheet] =
         oben_unten_links_rechts(sheet_no)
-    end   
+    end
     return @first_row[sheet]
   end
 
   # returns the last non-empty row in a sheet
   def last_row(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     unless @last_row[sheet]
       sheet_no = sheets.index(sheet) + 1
       @first_row[sheet], @last_row[sheet], @first_column[sheet], @last_column[sheet] =
@@ -211,7 +211,7 @@ class Google < GenericSpreadsheet
 
   # returns the first non-empty column in a sheet
   def first_column(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     unless @first_column[sheet]
       sheet_no = sheets.index(sheet) + 1
       @first_row[sheet], @last_row[sheet], @first_column[sheet], @last_column[sheet] =
@@ -222,7 +222,7 @@ class Google < GenericSpreadsheet
 
   # returns the last non-empty column in a sheet
   def last_column(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     unless @last_column[sheet]
       sheet_no = sheets.index(sheet) + 1
       @first_row[sheet], @last_row[sheet], @first_column[sheet], @last_column[sheet] =
@@ -233,10 +233,20 @@ class Google < GenericSpreadsheet
 
   private
 
-  # read all cells in a sheet. 
+  def _set_value(row,col,value,sheet=nil)
+    sheet ||= @default_sheet
+    @cell[sheet][ "#{row},#{col}"] = value
+  end
+
+  def set_type(row,col,type,sheet=nil)
+    sheet ||= @default_sheet
+    @cell_type[sheet]["#{row},#{col}"] = type
+  end
+
+  # read all cells in a sheet.
   def read_cells(sheet=nil)
-    sheet = @default_sheet unless sheet
-    raise RangeError, "illegal sheet <#{sheet}>" unless sheets.index(sheet)
+    sheet ||= @default_sheet
+    validate_sheet!(sheet)
     sheet_no = sheets.index(sheet)
     ws = @worksheets[sheet_no]
     for row in 1..ws.num_rows
@@ -253,7 +263,7 @@ class Google < GenericSpreadsheet
     end
     @cells_read[sheet] = true
   end
-  
+
   def determine_datatype(val, numval=nil)
     if val.nil? || val[0,1] == '='
       ty = :formula
@@ -267,7 +277,7 @@ class Google < GenericSpreadsheet
         ty = :datetime
       elsif date?(val)
         ty = :date
-      elsif numeric?(val) 
+      elsif numeric?(val)
         ty = :float
         val = val.to_f
       elsif time?(val)
@@ -277,7 +287,7 @@ class Google < GenericSpreadsheet
         ty = :string
       end
     end
-    return val, ty 
+    return val, ty
   end
 
   def add_to_cell_roo(row,col,value, sheet_no=1)

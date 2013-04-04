@@ -1,5 +1,5 @@
-require 'rubygems'
 require 'csv'
+require 'time'
 
 # The Csv class can read csv files (must be separated with commas) which then
 # can be handled like spreadsheets. This means you can access cells like A5
@@ -7,10 +7,9 @@ require 'csv'
 # The Csv class provides only string objects. If you want conversions to other
 # types you have to do it yourself.
 
-class Csv < GenericSpreadsheet
+class Roo::Csv < Roo::GenericSpreadsheet
   def initialize(filename, packed=nil, file_warning=:error, tmpdir=nil)
     @filename = filename
-    super()
     @cell = Hash.new
     @cell_type = Hash.new
     @cells_read = Hash.new
@@ -27,14 +26,14 @@ class Csv < GenericSpreadsheet
   end
 
   def cell(row, col, sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     @cell[[row,col]]
   end
 
   def celltype(row, col, sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     @cell_type[[row,col]]
@@ -46,17 +45,19 @@ class Csv < GenericSpreadsheet
 
   private
 
+  TYPE_MAP = {
+    String => :string,
+    Float => :float,
+    Date => :date,
+    DateTime => :datetime,
+  }
+
   def celltype_class(value)
-    return {String => :string,
-      Float => :float,
-      Date => :date,
-      DateTime => :datetime,
-    }[value.class]
-    raise "unknown type for #{value.inspect}"
+    TYPE_MAP[value.class]
   end
 
   def read_cells(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     @cell_type = {} unless @cell_type
     @cell = {} unless @cell
     @first_row[sheet] = 1

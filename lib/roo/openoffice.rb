@@ -1,42 +1,53 @@
-require 'rubygems'
 require 'fileutils'
-require 'zip/zipfilesystem'
 require 'date'
 require 'nokogiri'
 require 'cgi'
 require 'pp' #TODO
-class Openoffice < GenericSpreadsheet
+class Roo::Openoffice < Roo::GenericSpreadsheet
 
-  @@nr = 0
+  class << self
+    def extract_content(tmpdir, filename)
+      Zip::ZipFile.open(filename) do |zip|
+        process_zipfile(tmpdir, zip)
+      end
+    end
+
+    def process_zipfile(tmpdir, zip, path='')
+      if zip.file.file? path
+        if path == "content.xml"
+          open(File.join(tmpdir, 'roo_content.xml'),'wb') {|f|
+            f << zip.read(path)
+          }
+        end
+      else
+        unless path.empty?
+          path += '/'
+        end
+        zip.dir.foreach(path) do |filename|
+          process_zipfile(tmpdir, zip, path+filename)
+        end
+      end
+    end
+  end
 
   # initialization and opening of a spreadsheet file
   # values for packed: :zip
-  def initialize(filename, packed=nil, file_warning=:error, tmpdir=nil)
-    @file_warning = file_warning
-    super()
-    file_type_check(filename,'.ods','an openoffice', packed)
-    @tmpdir = GenericSpreadsheet.next_tmpdir
-    @tmpdir = File.join(ENV['ROO_TMP'], @tmpdir) if ENV['ROO_TMP'] 
-    @tmpdir = File.join(tmpdir, @tmpdir) if tmpdir 
-    unless File.exists?(@tmpdir)
-      FileUtils::mkdir(@tmpdir)
+  def initialize(filename, packed=nil, file_warning=:error, tmpdir_root=nil)
+    file_type_check(filename,'.ods','an Roo::Openoffice', file_warning, packed)
+    make_tmpdir(tmpdir_root) do |tmpdir|
+      filename = open_from_uri(filename, tmpdir) if uri?(filename)
+      filename = unzip(filename, tmpdir) if packed == :zip
+      @cells_read = Hash.new
+      #TODO: @cells_read[:default] = false
+      @filename = filename
+      unless File.file?(@filename)
+        raise IOError, "file #{@filename} does not exist"
+      end
+      self.class.extract_content(tmpdir, @filename)
+      @doc = File.open(File.join(tmpdir, "roo_content.xml")) do |file|
+        Nokogiri::XML(file)
+      end
     end
-    filename = open_from_uri(filename) if filename[0,7] == "http://"
-    filename = unzip(filename) if packed and packed == :zip
-    @cells_read = Hash.new
-    #TODO: @cells_read[:default] = false
-    @filename = filename
-    unless File.file?(@filename)
-      FileUtils::rm_r(@tmpdir)
-      raise IOError, "file #{@filename} does not exist"
-    end
-    @@nr += 1
-    @file_nr = @@nr
-    extract_content
-    file = File.new(File.join(@tmpdir, @file_nr.to_s+"_roo_content.xml"))
-    @doc = Nokogiri::XML(file)
-    file.close
-    FileUtils::rm_r(@tmpdir)
     @default_sheet = self.sheets.first
     @cell = Hash.new
     @cell_type = Hash.new
@@ -47,22 +58,20 @@ class Openoffice < GenericSpreadsheet
     @last_column = Hash.new
     @style = Hash.new
     @style_defaults = Hash.new { |h,k| h[k] = [] }
-    @style_definitions = Hash.new 
+    @style_definitions = Hash.new
     @header_line = 1
-    @label = Hash.new
-    @labels_read = false
     @comment = Hash.new
     @comments_read = Hash.new
   end
 
   def method_missing(m,*args)
-    read_labels unless @labels_read
+    read_labels
     # is method name a label name
 	  if @label.has_key?(m.to_s)
       row,col = label(m.to_s)
 		  cell(row,col)
 	  else
-		  # call super for methods like #a1 
+		  # call super for methods like #a1
 		  super
 	  end
   end
@@ -72,7 +81,7 @@ class Openoffice < GenericSpreadsheet
   # (1,1), (1,'A'), ('A',1), ('a',1) all refers to the
   # cell at the first line and first row.
   def cell(row, col, sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     if celltype(row,col,sheet) == :date
@@ -86,7 +95,7 @@ class Openoffice < GenericSpreadsheet
   # Returns nil if there is no formula.
   # The method #formula? checks if there is a formula.
   def formula(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     if @formula[sheet][[row,col]] == nil
@@ -106,7 +115,7 @@ class Openoffice < GenericSpreadsheet
 
   # true, if there is a formula
   def formula?(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     formula(row,col) != nil
@@ -115,7 +124,7 @@ class Openoffice < GenericSpreadsheet
   # returns each formula in the selected sheet as an array of elements
   # [row, col, formula]
   def formulas(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     if @formula[sheet]
       @formula[sheet].each.collect do |elem|
@@ -128,45 +137,27 @@ class Openoffice < GenericSpreadsheet
 
   class Font
     attr_accessor :bold, :italic, :underline
-    
-    def bold? 
+
+    def bold?
       @bold == 'bold'
     end
 
-    def italic? 
+    def italic?
       @italic == 'italic'
     end
-    
-    def underline? 
+
+    def underline?
       @underline != nil
     end
   end
 
-  # Given a cell, return the cell's style 
+  # Given a cell, return the cell's style
   def font(row, col, sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     style_name = @style[sheet][[row,col]] || @style_defaults[sheet][col - 1] || 'Default'
     @style_definitions[style_name]
-  end 
-  
-  # set a cell to a certain value
-  # (this will not be saved back to the spreadsheet file!)
-  def set(row,col,value,sheet=nil) #:nodoc:
-    sheet = @default_sheet unless sheet
-    read_cells(sheet) unless @cells_read[sheet]
-    row,col = normalize(row,col)
-    set_value(row,col,value,sheet)
-    if value.class == Fixnum
-      set_type(row,col,:float,sheet)
-    elsif value.class == String
-      set_type(row,col,:string,sheet)
-    elsif value.class == Float
-      set_type(row,col,:string,sheet)
-    else
-      raise ArgumentError, "Type for "+value.to_s+" not set"
-    end
   end
 
   # returns the type of a cell:
@@ -178,7 +169,7 @@ class Openoffice < GenericSpreadsheet
   # * :time
   # * :datetime
   def celltype(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     if @formula[sheet][[row,col]]
@@ -191,12 +182,12 @@ class Openoffice < GenericSpreadsheet
   def sheets
     return_sheets = []
     @doc.xpath("//*[local-name()='table']").each do |sheet|
-      return_sheets << sheet['name']
+      return_sheets << sheet.attributes["name"].value
     end
     return_sheets
   end
-    
-  # version of the openoffice document
+
+  # version of the Roo::Openoffice document
   # at 2007 this is always "1.0"
   def officeversion
     oo_version
@@ -206,7 +197,7 @@ class Openoffice < GenericSpreadsheet
   # shows the internal representation of all cells
   # mainly for debugging purposes
   def to_s(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     @cell[sheet].inspect
   end
@@ -214,13 +205,13 @@ class Openoffice < GenericSpreadsheet
   # returns the row,col values of the labelled cell
   # (nil,nil) if label is not defined
   def label(labelname)
-    read_labels unless @labels_read
+    read_labels
     unless @label.size > 0
       return nil,nil,nil
     end
     if @label.has_key? labelname
       return @label[labelname][1].to_i,
-        GenericSpreadsheet.letter_to_number(@label[labelname][2]),
+        Roo::GenericSpreadsheet.letter_to_number(@label[labelname][2]),
         @label[labelname][0]
     else
       return nil,nil,nil
@@ -228,24 +219,22 @@ class Openoffice < GenericSpreadsheet
   end
 
   # Returns an array which all labels. Each element is an array with
-  # [labelname, [sheetname,row,col]]
+  # [labelname, [row,col,sheetname]]
   def labels(sheet=nil)
-    read_labels unless @labels_read
-    result = []
-    @label.each do |label|
-      result << [ label[0], # name
+    read_labels
+    @label.map do |label|
+      [ label[0], # name
         [ label[1][1].to_i, # row
-          GenericSpreadsheet.letter_to_number(label[1][2]), # column
+          Roo::GenericSpreadsheet.letter_to_number(label[1][2]), # column
           label[1][0], # sheet
         ] ]
     end
-    result
   end
 
   # returns the comment at (row/col)
   # nil if there is no comment
   def comment(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     return nil unless @comment[sheet]
@@ -254,7 +243,7 @@ class Openoffice < GenericSpreadsheet
 
   # true, if there is a comment
   def comment?(row,col,sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_cells(sheet) unless @cells_read[sheet]
     row,col = normalize(row,col)
     comment(row,col) != nil
@@ -264,7 +253,7 @@ class Openoffice < GenericSpreadsheet
   # returns each comment in the selected sheet as an array of elements
   # [row, col, comment]
   def comments(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
     read_comments(sheet) unless @comments_read[sheet]
     if @comment[sheet]
       @comment[sheet].each.collect do |elem|
@@ -280,15 +269,15 @@ class Openoffice < GenericSpreadsheet
   # read the version of the OO-Version
   def oo_version
     @doc.xpath("//*[local-name()='document-content']").each do |office|
-      @officeversion = office.attributes['version'].to_s
+      @officeversion = attr(office,'version')
     end
   end
 
   # helper function to set the internal representation of cells
-  def set_cell_values(sheet,x,y,i,v,vt,formula,table_cell,str_v,style_name)
-    key = [y,x+i]    
+  def set_cell_values(sheet,x,y,i,v,value_type,formula,table_cell,str_v,style_name)
+    key = [y,x+i]
     @cell_type[sheet] = {} unless @cell_type[sheet]
-    @cell_type[sheet][key] = Openoffice.oo_type_2_roo_type(vt)
+    @cell_type[sheet][key] = Roo::Openoffice.oo_type_2_roo_type(value_type)
     @formula[sheet] = {} unless @formula[sheet]
     if formula
       ['of:', 'oooc:'].each do |prefix|
@@ -308,10 +297,10 @@ class Openoffice < GenericSpreadsheet
       @cell[sheet][key] = str_v
     when :date
       #TODO: if table_cell.attributes['date-value'].size != "XXXX-XX-XX".size
-      if table_cell.attributes['date-value'].to_s.size != "XXXX-XX-XX".size
+      if attr(table_cell,'date-value').size != "XXXX-XX-XX".size
         #-- dann ist noch eine Uhrzeit vorhanden
         #-- "1961-11-21T12:17:18"
-        @cell[sheet][key] = DateTime.parse(table_cell.attributes['date-value'].to_s)
+        @cell[sheet][key] = DateTime.parse(attr(table_cell,'date-value').to_s)
         @cell_type[sheet][key] = :datetime
       else
         @cell[sheet][key] = table_cell.attributes['date-value']
@@ -332,32 +321,32 @@ class Openoffice < GenericSpreadsheet
   # some content <text:s text:c="3"/>
   #++
   def read_cells(sheet=nil)
-    sheet = @default_sheet unless sheet
+    sheet ||= @default_sheet
+    validate_sheet!(sheet)
     sheet_found = false
-    raise ArgumentError, "Error: sheet '#{sheet||'nil'}' not valid" if @default_sheet == nil and sheet==nil
-    raise RangeError unless self.sheets.include? sheet
 
     @doc.xpath("//*[local-name()='table']").each do |ws|
-      if sheet == ws['name']
+      if sheet == attr(ws,'name')
         sheet_found = true
         col = 1
         row = 1
         ws.children.each do |table_element|
           case table_element.name
           when 'table-column'
-            @style_defaults[sheet] << table_element.attributes['default-cell-style-name'] 
+            @style_defaults[sheet] << table_element.attributes['default-cell-style-name']
           when 'table-row'
             if table_element.attributes['number-rows-repeated']
-              skip_row = table_element.attributes['number-rows-repeated'].to_s.to_i
+              skip_row = attr(table_element,'number-rows-repeated').to_s.to_i
               row = row + skip_row - 1
             end
             table_element.children.each do |cell|
-              skip_col = cell['number-columns-repeated']
-              formula = cell['formula']
-              vt = cell['value-type']
-              v =  cell['value']
-              style_name = cell['style-name']
-              if vt == 'string'
+              skip_col = attr(cell, 'number-columns-repeated')
+              formula = attr(cell,'formula')
+              value_type = attr(cell,'value-type')
+              v =  attr(cell,'value')
+              style_name = attr(cell,'style-name')
+              case value_type
+              when 'string'
                 str_v  = ''
                 # insert \n if there is more than one paragraph
                 para_count = 0
@@ -401,34 +390,34 @@ class Openoffice < GenericSpreadsheet
                     str_v = CGI.unescapeHTML(str_v)
                   end # == 'p'
                 end
-              elsif vt == 'time'
+              when 'time'
                 cell.children.each do |str|
                   if str.name == 'p'
                     v = str.content
                   end
                 end
-              elsif vt == '' or vt == nil
+              when '', nil
                 #
-              elsif vt == 'date'
+              when 'date'
                 #
-              elsif vt == 'percentage'
+              when 'percentage'
                 #
-              elsif vt == 'float'
+              when 'float'
                 #
-              elsif vt == 'boolean'
-                v = cell.attributes['boolean-value'].to_s
+              when 'boolean'
+                v = attr(cell,'boolean-value').to_s
               else
-                # raise "unknown type #{vt}"
+                # raise "unknown type #{value_type}"
               end
               if skip_col
                 if v != nil or cell.attributes['date-value']
                   0.upto(skip_col.to_i-1) do |i|
-                    set_cell_values(sheet,col,row,i,v,vt,formula,cell,str_v,style_name)
+                    set_cell_values(sheet,col,row,i,v,value_type,formula,cell,str_v,style_name)
                   end
                 end
                 col += (skip_col.to_i - 1)
               end # if skip
-              set_cell_values(sheet,col,row,0,v,vt,formula,cell,str_v,style_name)
+              set_cell_values(sheet,col,row,0,v,value_type,formula,cell,str_v,style_name)
               col += 1
             end
             row += 1
@@ -447,84 +436,38 @@ class Openoffice < GenericSpreadsheet
     @comments_read[sheet] = true
   end
 
-  # Only calls read_cells because GenericSpreadsheet calls read_comments
-  # whereas the reading of comments is done in read_cells for Openoffice-objects
+  # Only calls read_cells because Roo::GenericSpreadsheet calls read_comments
+  # whereas the reading of comments is done in read_cells for Roo::Openoffice-objects
   def read_comments(sheet=nil)
     read_cells(sheet)
   end
-  
+
   def read_labels
-    @doc.xpath("//table:named-range").each do |ne|
+    @label ||= Hash[@doc.xpath("//table:named-range").map do |ne|
       #-
       # $Sheet1.$C$5
       #+
-      name = ne.attribute('name').to_s
-      sheetname,coords = ne.attribute('cell-range-address').to_s.split('.')
-      col = coords.split('$')[1]
-      row = coords.split('$')[2]
+      name = attr(ne,'name').to_s
+      sheetname,coords = attr(ne,'cell-range-address').to_s.split('.$')
+      col, row = coords.split('$')
       sheetname = sheetname[1..-1] if sheetname[0,1] == '$'
-      @label[name] = [sheetname,row,col]
-    end
-    @labels_read = true
+      [name, [sheetname,row,col]]
+    end]
   end
-  
+
   def read_styles(style_elements)
-    @style_definitions['Default'] = Openoffice::Font.new
+    @style_definitions['Default'] = Roo::Openoffice::Font.new
     style_elements.each do |style|
       next unless style.name == 'style'
-      style_name = style.attributes['name']
+      style_name = attr(style,'name')
       style.each do |properties|
-        font = Openoffice::Font.new
-        font.bold = properties.attributes['font-weight']
-        font.italic = properties.attributes['font-style']
-        font.underline = properties.attributes['text-underline-style']
+        font = Roo::Openoffice::Font.new
+        font.bold = attr(properties,'font-weight')
+        font.italic = attr(properties,'font-style')
+        font.underline = attr(properties,'text-underline-style')
         @style_definitions[style_name] = font
       end
     end
-  end
-  
-  # Checks if the default_sheet exists. If not an RangeError exception is
-  # raised
-  def check_default_sheet
-    sheet_found = false
-    raise ArgumentError, "Error: default_sheet not set" if @default_sheet == nil
-    sheet_found = true if sheets.include?(@default_sheet)
-    if ! sheet_found
-      raise RangeError, "sheet '#{@default_sheet}' not found"
-    end
-  end
-
-  def process_zipfile(zip, path='')
-    if zip.file.file? path
-      if path == "content.xml"
-        open(File.join(@tmpdir, @file_nr.to_s+'_roo_content.xml'),'wb') {|f|
-          f << zip.read(path)
-        }
-      end
-    else
-      unless path.empty?
-        path += '/'
-      end
-      zip.dir.foreach(path) do |filename|
-        process_zipfile(zip, path+filename)
-      end
-    end
-  end
-
-  def extract_content
-    Zip::ZipFile.open(@filename) do |zip|
-      process_zipfile(zip)
-    end
-  end
-
-  def set_value(row,col,value,sheet=nil)
-    sheet = @default_value unless sheet
-    @cell[sheet][[row,col]] = value
-  end
-
-  def set_type(row,col,type,sheet=nil)
-    sheet = @default_value unless sheet
-    @cell_type[sheet][[row,col]] = type
   end
 
   A_ROO_TYPE = {
@@ -535,10 +478,10 @@ class Openoffice < GenericSpreadsheet
     "time"       => :time,
   }
 
-  def Openoffice.oo_type_2_roo_type(ootype)
+  def self.oo_type_2_roo_type(ootype)
     return A_ROO_TYPE[ootype]
   end
- 
+
   # helper method to convert compressed spaces and other elements within
   # an text into a string
   def children_to_string(children)
@@ -562,8 +505,16 @@ class Openoffice < GenericSpreadsheet
     result
   end
 
+
+  private
+  def attr(node, attr_name)
+    if node.attributes[attr_name]
+      node.attributes[attr_name].value
+    end
+  end
+
 end # class
 
-# Libreoffice is just an alias for Openoffice class
-class Libreoffice < Openoffice
+# Libreoffice is just an alias for Roo::Openoffice class
+class Roo::Libreoffice < Roo::Openoffice
 end
